@@ -1,11 +1,9 @@
 import collections
 import nltk
+import numpy as np
 from nltk.translate import bleu_score
 from nltk.translate.bleu_score import SmoothingFunction
 from nltk.translate.meteor_score import meteor_score
-
-import rouge
-
 
 def check_sig(v1s, v2s, alpha=0.05):
     from scipy import stats
@@ -68,6 +66,26 @@ def eval_model(df_gt, df_preds, best_match=False):
 
     return [meteor, bleu_1, bleu], [bleu1_scores, bleu_scores, meteor_scores]
 
+def prec_at(ranking_problems, baseline=None, k=1):
+    correct_cases = 0
+    total_num_cases = 0
+    for problem in ranking_problems:      
+        if baseline != None:
+            if baseline == 'sen_length':
+                selected_premises = sorted(problem['documents'], key=lambda x: -len(nltk.word_tokenize(x['docText'])))[0:k]
+            else:
+                selected_premises = np.random.choice(problem['documents'], k)
+        else:
+            selected_premises = sorted(problem['documents'], key=lambda x: -x['score'])[0:k]
+
+        if 1 in [x['relevance'] for x in selected_premises]:
+            correct_cases+=1
+        
+        total_num_cases+=1
+        
+    return round(correct_cases/total_num_cases, 3)
+
+
 def perform_significance_tests(app1_scores, app2_cores):
     all_data = np.array(list(zip(app1_scores, app2_cores)))
     chunks = np.array_split(all_data, 5, axis=2)
@@ -85,25 +103,3 @@ def perform_significance_tests(app1_scores, app2_cores):
         }
         
     return sig_report
-
-def bert_mover_eval(df_gt, df_preds):
-    idf_dict_hyp = defaultdict(lambda: 1.)
-    idf_dict_ref = defaultdict(lambda: 1.)
-
-    def chunks(lst, n):
-        """Yield successive n-sized chunks from lst."""
-        for i in range(0, len(lst), n):
-            yield lst[i:i + n]
-
-    scores = []
-    for chunk in chunks(list(zip(df_gt, df_preds)), 50):
-        chunk_gt, chunk_pred = zip(*chunk)
-        chunk_scores = word_mover_score(chunk_gt, chunk_pred, idf_dict_ref, idf_dict_hyp, \
-                                  stop_words=[], n_gram=1, remove_subwords=True)
-        scores = scores + chunk_scores
-    
-    return scores
-
-def bert_eval(df_gt, df_preds):
-    P, R, F1 = score(df_gt, df_preds, lang='en')
-    return P , R, F1
