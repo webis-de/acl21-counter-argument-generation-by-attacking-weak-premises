@@ -12,8 +12,8 @@ The code folder contains all python file and notebooks necessary to reproduce ou
   
   - _attack_generation_: Contains the code for fine-tuning GPT model and the baseline, as well as generting attacks on argument given the weak-premises.
   
-  -_overall_approach.ipynb_: Contains our code for the overall approach, that is identifying weak premises using ltr-bert and then generate attacks.
+  - _overall_approach.ipynb_: Contains our code for the overall approach, that is identifying weak premises using ltr-bert and then generate attacks.
   
-  -_evaluation_: Contains all notebooks for evaluating all steps of our approach
+  - _evaluation_: Contains all notebooks for evaluating all steps of our approach
   
   
