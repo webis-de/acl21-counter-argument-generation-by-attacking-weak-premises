@@ -21,10 +21,10 @@ from transformers import (AdamW, OpenAIGPTDoubleHeadsModel, OpenAIGPTTokenizer,
 
 from utils import get_dataset, make_logdir
 
-SPECIAL_TOKENS = ["<bos>", "<eos>", "<speaker1>", "<speaker2>", "<pad>"]
+SPECIAL_TOKENS = ["<bos>", "<eos>", "<argument>", "<premise>", "<counter>", "<pad>"]
 ATTR_TO_SPECIAL_TOKEN = {'bos_token': '<bos>', 'eos_token': '<eos>', 'pad_token': '<pad>',
-                         'additional_special_tokens': ['<speaker1>', '<speaker2>']}
-MODEL_INPUTS = ["input_ids", "mc_token_ids", "lm_labels", "mc_labels", "token_type_ids"]
+                         'additional_special_tokens': ['<argument>', '<premise>', '<counter>']}
+MODEL_INPUTS  = ["input_ids", "mc_token_ids", "lm_labels", "mc_labels", "token_type_ids"]
 PADDED_INPUTS = ["input_ids", "lm_labels", "token_type_ids"]
 
 logger = logging.getLogger(__file__)
@@ -53,18 +53,36 @@ def add_special_tokens_(model, tokenizer):
     if num_added_tokens > 0:
         model.resize_token_embeddings(new_num_tokens=orig_num_tokens + num_added_tokens)
 
-def build_input_from_segments(persona, history, reply, tokenizer, lm_labels=False, with_eos=True):
-    """ Build a sequence of input from 3 segments: persona, history and last reply. """
-    bos, eos, speaker1, speaker2 = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
-    sequence = [[bos] + list(chain(*persona))] + history + [reply + ([eos] if with_eos else [])]
-    sequence = [sequence[0]] + [[speaker2 if (len(sequence)-i) % 2 else speaker1] + s for i, s in enumerate(sequence[1:])]
+def build_baseline_input_from_segments(argument, counter, tokenizer, lm_labels=False, with_eos=True):
+    """ Build a sequence of input from 2 segments: argument and counter. """
+    bos, eos, argument_token, _, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
+
+    sequence = [[bos, argument_token] + list(chain(*argument))] + [[counter_token] + counter + ([eos] if with_eos else [])]
+
     instance = {}
     instance["input_ids"] = list(chain(*sequence))
-    instance["token_type_ids"] = [speaker2 if i % 2 else speaker1 for i, s in enumerate(sequence) for _ in s]
+    instance["token_type_ids"] = list(chain(*[[argument_token] * len(sequence[0])] + [[counter_token] * len(sequence[1])])) #[speaker2 if i % 2 else speaker1 for i, s in enumerate(sequence) for _ in s]
+    instance["mc_token_ids"] = len(instance["input_ids"]) - 1
+    instance["lm_labels"] = [-100] * len(instance["input_ids"])
+
+    if lm_labels:
+        instance["lm_labels"] = ([-100] * sum(len(s) for s in sequence[:-1])) + [-100] + sequence[-1][1:]
+
+    return instance
+
+def build_input_from_segments(argument, premise, counter, tokenizer, lm_labels=False, with_eos=True):
+    """ Build a sequence of input from 3 segments: argument, premise, and counter. """
+    bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
+    sequence = [[bos, argument_token] + list(chain(*argument))] + [[premise_token] + list(chain(*premise))] + [[counter_token] + counter + ([eos] if with_eos else [])]
+
+    instance = {}
+    instance["input_ids"] = list(chain(*sequence))
+    instance["token_type_ids"] = list(chain(*[[argument_token] * len(sequence[0])] + [[premise_token] * len(sequence[1])] + [[counter_token] * len(sequence[2])])) #[speaker2 if i % 2 else speaker1 for i, s in enumerate(sequence) for _ in s]
     instance["mc_token_ids"] = len(instance["input_ids"]) - 1
     instance["lm_labels"] = [-100] * len(instance["input_ids"])
     if lm_labels:
         instance["lm_labels"] = ([-100] * sum(len(s) for s in sequence[:-1])) + [-100] + sequence[-1][1:]
+    
     return instance
 
 
@@ -75,21 +93,30 @@ def get_data_loaders(args, tokenizer):
     logger.info("Build inputs and labels")
     datasets = {"train": defaultdict(list), "valid": defaultdict(list)}
     for dataset_name, dataset in personachat.items():
-        num_candidates = len(dataset[0]["utterances"][0]["candidates"])
+        num_candidates = len(dataset[0]["attacks"][0]["candidates"])
         if args.num_candidates > 0 and dataset_name == 'train':
             num_candidates = min(args.num_candidates, num_candidates)
         for dialog in dataset:
-            persona = dialog["personality"].copy()
+            persona = dialog["context"].copy()
             for _ in range(args.personality_permutations):
-                for utterance in dialog["utterances"]:
-                    history = utterance["history"][-(2*args.max_history+1):]
+                for utterance in dialog["attacks"]:
+                    history = utterance["premise"][-(2*args.max_history+1):]
+                    #pre-check if the sequence potentially longer than 512
+                    seqs_longer_than_512 = [ len(list(chain(*([list(chain(*persona))] + history + [candidate])))) + 5 > 512 for candidate in utterance["candidates"][-num_candidates:]]
+                    if any(seqs_longer_than_512):
+                        print('Skip long sequences...')
+                        continue
+
                     for j, candidate in enumerate(utterance["candidates"][-num_candidates:]):
                         lm_labels = bool(j == num_candidates-1)
-                        instance = build_input_from_segments(persona, history, candidate, tokenizer, lm_labels)
+                        instance = build_baseline_input_from_segments(persona, candidate, tokenizer, lm_labels) if args.baseline else build_input_from_segments(persona, history, candidate, tokenizer, lm_labels)
+
                         for input_name, input_array in instance.items():
                             datasets[dataset_name][input_name].append(input_array)
+                    
                     datasets[dataset_name]["mc_labels"].append(num_candidates - 1)
                     datasets[dataset_name]["n_candidates"] = num_candidates
+                
                 persona = [persona[-1]] + persona[:-1]  # permuted personalities
 
     logger.info("Pad inputs and convert to Tensor")
@@ -119,6 +146,9 @@ def train():
     parser.add_argument("--dataset_path", type=str, default="", help="Path or url of the dataset. If empty download from S3.")
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
     parser.add_argument("--model_checkpoint", type=str, default="openai-gpt", help="Path, url or short name of the model")
+    parser.add_argument("--baseline", action='store_true', help="whether to train a baseline")
+    parser.add_argument("--output_model_checkpoint", type=str, help="Path to the output model")
+    parser.add_argument("--log_dir", type=str, help="Path to the logging dir")
     parser.add_argument("--num_candidates", type=int, default=2, help="Number of candidates for training")
     parser.add_argument("--max_history", type=int, default=2, help="Number of previous exchanges to keep in history")
     parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size for training")
@@ -241,7 +271,7 @@ def train():
         pbar.attach(trainer, metric_names=["loss"])
         evaluator.add_event_handler(Events.COMPLETED, lambda _: pbar.log_message("Validation: %s" % pformat(evaluator.state.metrics)))
 
-        log_dir = make_logdir(args.model_checkpoint)
+        log_dir = make_logdir(args.log_dir, args.output_model_checkpoint)
         tb_logger = TensorboardLogger(log_dir)
 
         tb_logger.attach(trainer, log_handler=OutputHandler(tag="training", metric_names=["loss"]), event_name=Events.ITERATION_COMPLETED)
