@@ -70,7 +70,7 @@ def build_baseline_input_from_segments(argument, counter, tokenizer, lm_labels=F
 
     return instance
 
-def build_input_from_segments_v4(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+def build_input_from_segments_with_only_special_tokens(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: argument, premise, and counter. """
     bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
     
@@ -97,10 +97,21 @@ def build_input_from_segments_v4(argument, weak_premises_indices, counter, token
     
     return instance
 
-def build_input_from_segments_v3(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+def build_input_from_segments_with_extra_special_tokens(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: argument, premise, and counter. """
     bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
-    sequence = [[bos, argument_token] + list(chain(*argument))] + [[counter_token] + counter + ([eos] if with_eos else [])]
+    
+    #modifying argumet to add premise_start and premise_end tokens
+    if (len(weak_premises_indices)) > 0:
+        weak_premises_min_idx = min(weak_premises_indices)
+        weak_premises_max_idx = max(weak_premises_indices)
+        argument = [[premise_token] + sent if idx == weak_premises_min_idx else sent  for idx, sent in enumerate(argument)]
+        argument = [sent + [argument_token] if idx == weak_premises_max_idx else sent for idx, sent in enumerate(argument)]
+    
+    #add all tokens
+    sequence = []
+    sequence += [[bos, argument_token] + list(chain(*argument))]
+    sequence += [[counter_token] + counter + ([eos] if with_eos else [])]
     
     instance = {}
     instance["input_ids"] = list(chain(*sequence))
@@ -113,7 +124,7 @@ def build_input_from_segments_v3(argument, weak_premises_indices, counter, token
     
     return instance
 
-def build_input_from_segments_v2(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+def build_input_from_segments_without_extra_special_tokens(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: argument, premise, and counter. """
     bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
     sequence = [[bos, argument_token] + list(chain(*argument))] + [[counter_token] + counter + ([eos] if with_eos else [])]
@@ -171,16 +182,16 @@ def get_data_loaders(args, tokenizer):
         num_candidates = len(dataset[0]["attacks"][0]["candidates"])
         if args.num_candidates > 0 and dataset_name == 'train':
             num_candidates = min(args.num_candidates, num_candidates)
-        for dialog in dataset:
-            persona = dialog["context"].copy()
+        for instance in dataset:
+            argument = instance["context"].copy()
             for _ in range(args.personality_permutations):
-                for utterance in dialog["attacks"]:
-                    history = utterance["premise"][-(2*args.max_history+1):]
+                for utterance in instance["attacks"]:
+                    weak_premise = utterance["premise"][-(2*args.max_history+1):]
                     #pre-check if the sequence potentially longer than 512
                     if args.premise_extra:
-                        seqs_lens = [ len(list(chain(*([list(chain(*persona))] + history + [candidate])))) + 5 > 510 for candidate in utterance["candidates"][-num_candidates:]]
+                        seqs_lens = [ len(list(chain(*([list(chain(*argument))] + weak_premise + [candidate])))) + 5 > 510 for candidate in utterance["candidates"][-num_candidates:]]
                     else:
-                        seqs_lens = [len(list(chain(*persona))) + len(x) + 5 > 510 for x in  utterance["candidates"][-num_candidates:]]
+                        seqs_lens = [len(list(chain(*argument))) + len(x) + 5 > 510 for x in  utterance["candidates"][-num_candidates:]]
                     
                     total+=1
                     if any(seqs_lens):
@@ -191,23 +202,20 @@ def get_data_loaders(args, tokenizer):
                     for j, candidate in enumerate(utterance["candidates"][-num_candidates:]):
                         lm_labels = bool(j == num_candidates-1)
                         if args.baseline:
-                            instance = build_baseline_input_from_segments(persona, candidate, tokenizer, lm_labels) 
+                            instance = build_baseline_input_from_segments(argument, candidate, tokenizer, lm_labels) 
                         else:
-                            if args.premise_extra:
-                                instance = build_input_from_segments_v1(persona, history, candidate, tokenizer, lm_labels)
+                            weak_premise_idxs = find_weak_premises_in_arg(argument, weak_premise)
+                            if weak_premise_idxs == []:
+                                premise_not_found+=1
+
+                            if args.build_instance_version == 'v2':
+                                instance = build_input_from_segments_without_extra_special_tokens(argument, weak_premise_idxs, candidate, tokenizer, lm_labels)
+                            elif args.build_instance_version == 'v3':
+                                instance = build_input_from_segments_with_extra_special_tokens(argument, weak_premise_idxs, candidate, tokenizer, lm_labels)
+                            elif args.build_instance_version == 'v4':
+                                instance = build_input_from_segments_with_only_special_tokens(argument, weak_premise_idxs, candidate, tokenizer, lm_labels)
                             else:
-                                sen_indices = find_weak_premises_in_arg(persona, history)
-                                if sen_indices == []:
-                                    premise_not_found+=1
-                                
-                                if args.build_instance_version == 'v2':
-                                    instance = build_input_from_segments_v2(persona, sen_indices, candidate, tokenizer, lm_labels)
-                                elif args.build_instance_version == 'v3':
-                                    instance = build_input_from_segments_v3(persona, sen_indices, candidate, tokenizer, lm_labels)
-                                elif args.build_instance_version == 'v4':
-                                    instance = build_input_from_segments_v4(persona, sen_indices, candidate, tokenizer, lm_labels)
-                                else:
-                                    logger.error('Build Instance version is not identified..')
+                                logger.error('Build Instance version is not identified..')
                                 
                         for input_name, input_array in instance.items():
                             datasets[dataset_name][input_name].append(input_array)
@@ -215,7 +223,7 @@ def get_data_loaders(args, tokenizer):
                     datasets[dataset_name]["mc_labels"].append(num_candidates - 1)
                     datasets[dataset_name]["n_candidates"] = num_candidates
                 
-                persona = [persona[-1]] + persona[:-1]  # permuted personalities
+                argument = [argument[-1]] + argument[:-1]
         
         logger.info("Skipped {} cases out of {} in the {} dataset!!".format(skipped, total, dataset_name))
         logger.info("In {} cases, premise wasn't found in the post".format(premise_not_found))
