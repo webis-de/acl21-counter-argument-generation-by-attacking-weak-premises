@@ -70,7 +70,66 @@ def build_baseline_input_from_segments(argument, counter, tokenizer, lm_labels=F
 
     return instance
 
-def build_input_from_segments(argument, premise, counter, tokenizer, lm_labels=False, with_eos=True):
+def build_input_from_segments_v4(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+    """ Build a sequence of input from 3 segments: argument, premise, and counter. """
+    bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
+    
+    #modifying argumet to add premise_start and premise_end tokens
+    if (len(weak_premises_indices)) > 0:
+        weak_premises_min_idx = min(weak_premises_indices)
+        weak_premises_max_idx = max(weak_premises_indices)
+        argument = [[premise_token] + sent if idx == weak_premises_min_idx else sent  for idx, sent in enumerate(argument)]
+        argument = [sent + [argument_token] if idx == weak_premises_max_idx else sent for idx, sent in enumerate(argument)]
+  
+    #add all tokens
+    sequence = []
+    sequence += [[bos, argument_token] + list(chain(*argument))]
+    sequence += [[counter_token] + counter + ([eos] if with_eos else [])]
+    
+    instance = {}
+    instance["input_ids"] = list(chain(*sequence))
+    instance["token_type_ids"] = [argument_token] * len(instance['input_ids'])
+    
+    instance["mc_token_ids"] = len(instance["input_ids"]) - 1
+    instance["lm_labels"] = [-100] * len(instance["input_ids"])
+    if lm_labels:
+        instance["lm_labels"] = ([-100] * sum(len(s) for s in sequence[:-1])) + [-100] + sequence[-1][1:]
+    
+    return instance
+
+def build_input_from_segments_v3(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+    """ Build a sequence of input from 3 segments: argument, premise, and counter. """
+    bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
+    sequence = [[bos, argument_token] + list(chain(*argument))] + [[counter_token] + counter + ([eos] if with_eos else [])]
+    
+    instance = {}
+    instance["input_ids"] = list(chain(*sequence))
+    instance["token_type_ids"] = [argument_token] * 2 + list(chain(*[[premise_token] * len(s) if i in weak_premises_indices else [argument_token] * len(s) for i, s in enumerate(argument)])) + [counter_token] * len(sequence[1])
+        
+    instance["mc_token_ids"] = len(instance["input_ids"]) - 1
+    instance["lm_labels"] = [-100] * len(instance["input_ids"])
+    if lm_labels:
+        instance["lm_labels"] = ([-100] * sum(len(s) for s in sequence[:-1])) + [-100] + sequence[-1][1:]
+    
+    return instance
+
+def build_input_from_segments_v2(argument, weak_premises_indices, counter, tokenizer, lm_labels=False, with_eos=True):
+    """ Build a sequence of input from 3 segments: argument, premise, and counter. """
+    bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
+    sequence = [[bos, argument_token] + list(chain(*argument))] + [[counter_token] + counter + ([eos] if with_eos else [])]
+    
+    instance = {}
+    instance["input_ids"] = list(chain(*sequence))
+    instance["token_type_ids"] = [argument_token] * 2 + list(chain(*[[premise_token] * len(s) if i in weak_premises_indices else [argument_token] * len(s) for i, s in enumerate(argument)])) + [counter_token] * len(sequence[1])
+        
+    instance["mc_token_ids"] = len(instance["input_ids"]) - 1
+    instance["lm_labels"] = [-100] * len(instance["input_ids"])
+    if lm_labels:
+        instance["lm_labels"] = ([-100] * sum(len(s) for s in sequence[:-1])) + [-100] + sequence[-1][1:]
+    
+    return instance
+
+def build_input_from_segments_v1(argument, premise, counter, tokenizer, lm_labels=False, with_eos=True):
     """ Build a sequence of input from 3 segments: argument, premise, and counter. """
     bos, eos, argument_token, premise_token, counter_token = tokenizer.convert_tokens_to_ids(SPECIAL_TOKENS[:-1])
     sequence = [[bos, argument_token] + list(chain(*argument))] + [[premise_token] + list(chain(*premise))] + [[counter_token] + counter + ([eos] if with_eos else [])]
@@ -85,14 +144,30 @@ def build_input_from_segments(argument, premise, counter, tokenizer, lm_labels=F
     
     return instance
 
+def find_weak_premises_in_arg(argument, weak_premises):
+    sen_indices=[]
+    premises_as_str = [' '.join([str(t) for t in p]) for p in weak_premises]
+    for i, s in enumerate(argument):
+        s_str = ' '.join([str(x) for x in s])
+        s_in_weak_premises = [p.find(s_str) > -1 or s_str.find(p) > -1 for p in premises_as_str]
+        if any(s_in_weak_premises):
+            sen_indices.append(i)
+    return sen_indices
 
 def get_data_loaders(args, tokenizer):
     """ Prepare the dataset for training and evaluation """
     personachat = get_dataset(tokenizer, args.dataset_path, args.dataset_cache)
 
     logger.info("Build inputs and labels")
+    logger.info("using premise extra: {}".format(args.premise_extra))
+    logger.info("Build instance version: {}".format(args.build_instance_version))
     datasets = {"train": defaultdict(list), "valid": defaultdict(list)}
+    skipped=0
+    total=0
+    premise_not_found=0
     for dataset_name, dataset in personachat.items():
+        skipped=0
+        total=0
         num_candidates = len(dataset[0]["attacks"][0]["candidates"])
         if args.num_candidates > 0 and dataset_name == 'train':
             num_candidates = min(args.num_candidates, num_candidates)
@@ -102,15 +177,38 @@ def get_data_loaders(args, tokenizer):
                 for utterance in dialog["attacks"]:
                     history = utterance["premise"][-(2*args.max_history+1):]
                     #pre-check if the sequence potentially longer than 512
-                    seqs_longer_than_512 = [ len(list(chain(*([list(chain(*persona))] + history + [candidate])))) + 5 > 512 for candidate in utterance["candidates"][-num_candidates:]]
-                    if any(seqs_longer_than_512):
-                        print('Skip long sequences...')
+                    if args.premise_extra:
+                        seqs_lens = [ len(list(chain(*([list(chain(*persona))] + history + [candidate])))) + 5 > 510 for candidate in utterance["candidates"][-num_candidates:]]
+                    else:
+                        seqs_lens = [len(list(chain(*persona))) + len(x) + 5 > 510 for x in  utterance["candidates"][-num_candidates:]]
+                    
+                    total+=1
+                    if any(seqs_lens):
+                        skipped+=1
                         continue
+                    
 
                     for j, candidate in enumerate(utterance["candidates"][-num_candidates:]):
                         lm_labels = bool(j == num_candidates-1)
-                        instance = build_baseline_input_from_segments(persona, candidate, tokenizer, lm_labels) if args.baseline else build_input_from_segments(persona, history, candidate, tokenizer, lm_labels)
-
+                        if args.baseline:
+                            instance = build_baseline_input_from_segments(persona, candidate, tokenizer, lm_labels) 
+                        else:
+                            if args.premise_extra:
+                                instance = build_input_from_segments_v1(persona, history, candidate, tokenizer, lm_labels)
+                            else:
+                                sen_indices = find_weak_premises_in_arg(persona, history)
+                                if sen_indices == []:
+                                    premise_not_found+=1
+                                
+                                if args.build_instance_version == 'v2':
+                                    instance = build_input_from_segments_v2(persona, sen_indices, candidate, tokenizer, lm_labels)
+                                elif args.build_instance_version == 'v3':
+                                    instance = build_input_from_segments_v3(persona, sen_indices, candidate, tokenizer, lm_labels)
+                                elif args.build_instance_version == 'v4':
+                                    instance = build_input_from_segments_v4(persona, sen_indices, candidate, tokenizer, lm_labels)
+                                else:
+                                    logger.error('Build Instance version is not identified..')
+                                
                         for input_name, input_array in instance.items():
                             datasets[dataset_name][input_name].append(input_array)
                     
@@ -118,6 +216,9 @@ def get_data_loaders(args, tokenizer):
                     datasets[dataset_name]["n_candidates"] = num_candidates
                 
                 persona = [persona[-1]] + persona[:-1]  # permuted personalities
+        
+        logger.info("Skipped {} cases out of {} in the {} dataset!!".format(skipped, total, dataset_name))
+        logger.info("In {} cases, premise wasn't found in the post".format(premise_not_found))
 
     logger.info("Pad inputs and convert to Tensor")
     tensor_datasets = {"train": [], "valid": []}
@@ -147,6 +248,8 @@ def train():
     parser.add_argument("--dataset_cache", type=str, default='./dataset_cache', help="Path or url of the dataset cache")
     parser.add_argument("--model_checkpoint", type=str, default="openai-gpt", help="Path, url or short name of the model")
     parser.add_argument("--baseline", action='store_true', help="whether to train a baseline")
+    parser.add_argument("--premise_extra", action='store_true', help="Whether premise is extra segment or not")
+    parser.add_argument("--build_instance_version", type=str, help="build instance version v2 or v3")
     parser.add_argument("--output_model_checkpoint", type=str, help="Path to the output model")
     parser.add_argument("--log_dir", type=str, help="Path to the logging dir")
     parser.add_argument("--num_candidates", type=int, default=2, help="Number of candidates for training")

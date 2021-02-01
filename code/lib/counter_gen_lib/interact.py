@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from transformers import OpenAIGPTLMHeadModel, OpenAIGPTTokenizer, GPT2LMHeadModel, GPT2Tokenizer
-from train import SPECIAL_TOKENS, build_input_from_segments, build_baseline_input_from_segments, add_special_tokens_
+from train import SPECIAL_TOKENS, build_input_from_segments_v1, build_input_from_segments_v2, build_input_from_segments_v3, build_input_from_segments_v4, build_baseline_input_from_segments, find_weak_premises_in_arg, add_special_tokens_
 from utils import get_dataset, download_pretrained_model
 
 def top_filtering(logits, top_k=0., top_p=0.9, threshold=-float('Inf'), filter_value=-float('Inf')):
@@ -107,11 +107,30 @@ def sample_sequence(personality, history, tokenizer, model, args, current_output
         if baseline:
             instance = build_baseline_input_from_segments(personality, current_output, tokenizer, with_eos=False)
         else:
-            instance = build_input_from_segments(personality, history, current_output, tokenizer, with_eos=False)
+            if args.build_instance_version=='v1':
+                instance = build_input_from_segments_v1(personality, history, current_output, tokenizer, with_eos=False)
+            else:
+                weak_premises_indices = find_weak_premises_in_arg(personality, history)
+                if len(weak_premises_indices) == 0:
+                    warnings.warn("Warning: Weak premise couldn't be identified in argument. Attacking the first sentence")
+
+                if args.build_instance_version=='v2':
+                    instance = build_input_from_segments_v2(personality, weak_premises_indices, current_output, tokenizer, with_eos=False)
+                elif args.build_instance_version=='v3':
+                    instance = build_input_from_segments_v3(personality, weak_premises_indices, current_output, tokenizer, with_eos=False)
+                elif args.build_instance_version=='v4':
+                    instance = build_input_from_segments_v4(personality, weak_premises_indices, current_output, tokenizer, with_eos=False)
+                else:
+                    print('Wrong version is used ...')
+                    exit()
 
         input_ids = torch.tensor(instance["input_ids"], device=args.device).unsqueeze(0)
         token_type_ids = torch.tensor(instance["token_type_ids"], device=args.device).unsqueeze(0)
 
+        if input_ids.shape[1] > 510:
+            warnings.warn("Warning: sequense is larger than 512")
+            break
+            
         logits = model(input_ids, token_type_ids=token_type_ids)
         if isinstance(logits, tuple):  # for gpt2 and maybe others
             logits = logits[0]
