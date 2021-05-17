@@ -1,0 +1,7 @@
+Requirements for argument-undermining:
+
+- pip install jupyterlab
+- pip install pandas
+- pip install sklearn
+- pip install matplotlib
+- pip install tabulate
