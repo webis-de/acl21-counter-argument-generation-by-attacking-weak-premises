@@ -1,4 +1,20 @@
-# counter-argument-generation-via-undermining
+# Paper: Argument Undermining: Counter-Argument generation by Attacking Weak Premises
+
+This is the code for the paper *Argument Undermining: Counter-Argument generation by Attacking Weak Premises*.
+
+Milad Alshomary, Shahbaz Syed, Martin Potthast, and Henning Wachsmuth
+
+
+      @InProceedings{alshomary:2021b,
+        author =              {Milad Alshomary, Shahbaz Syed, Martin Potthast, and Henning Wachsmuth},
+        booktitle =           {The Joint Conference of the 59th Annual Meeting of the Association for Computational Linguistics and the 11th International Joint Conference on Natural Language Processing (ACL-IJCNLP 2021)},
+        month =               August,
+        publisher =           {ACL-IJCNLP},
+        title =               {{Argument Undermining: Counter-Argument generation by Attacking Weak Premises}},
+        year =                2021
+      }
+
+-----------------------------------------------
 
 ## Data:
 The data folder consists of the following:
